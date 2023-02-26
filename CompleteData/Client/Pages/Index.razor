@@ -1,0 +1,240 @@
+﻿@page "/"
+@inject CustomerManager CustomerManager
+@inject HttpClient HttpClient
+
+@if (Customers != null)
+{
+    <span>&nbsp;Filter by Name:&nbsp;</span>
+    <input @bind="@NameFilter" @bind:event="oninput" @onkeyup="FilterChanged" />
+    <span>&nbsp;</span>
+    <button @onclick="ClearFilter">Clear</button>
+
+    @if (CanIAddaCustomer())
+    {
+        <span>&nbsp;</span>
+        <button @onclick="AddCustomer">Add Customer</button>
+    }
+
+    <br />
+    <br />
+    <select @onchange="CustomerSelected" size="20" style="width:100%;">
+        @foreach (var customer in FilteredCustomers)
+        {
+            <option value="@customer.CustomerId">@customer.ContactName</option>
+        }
+    </select>
+    <br />
+    <br />
+}
+else
+{
+    <i>Loading Customers...</i>
+}
+@if (Customer != null)
+{
+    <span>&nbsp;Update Name:&nbsp;</span>
+    <input @bind="@Customer.ContactName" />
+    <button @onclick="UpdateCustomer">Update</button>
+    <br />
+    <br />
+    <button @onclick="DeleteCustomer">Delete</button>
+}
+<br />
+<span style="color:red;">@ErrorMessage</span>
+
+@code
+{
+    List<Customers> Customers;
+
+    Customers[] FilteredCustomers =>
+        Customers.Where(i => i.ContactName.ToLower()
+        .Contains(NameFilter.ToLower())).ToArray();
+
+    Customers Customer;
+    string NameFilter = "";
+    string ErrorMessage = "";
+    HubConnection connection;
+
+    async Task FilterChanged(KeyboardEventArgs args)
+    {
+        ErrorMessage = "";
+        Customer = null;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    async Task ClearFilter()
+    {
+        ErrorMessage = "";
+        NameFilter = "";
+        Customer = null;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    async Task DeleteCustomer()
+    {
+        ErrorMessage = "";
+        if (await CustomerManager.Delete(Customer))
+        {
+            var original = (from x in Customers
+                            where x.CustomerId == Customer.CustomerId
+                            select x).FirstOrDefault();
+            if (original != null)
+            {
+                var index = Customers.IndexOf(original);
+                Customers.RemoveAt(index);
+                // Update other clients
+                await connection.InvokeAsync("SyncRecord", "customers", "delete",
+                                             Customer.CustomerId);
+                Customer = null;
+            }
+        }
+        else
+        {
+            ErrorMessage = "Could not delete Customer.";
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    async Task UpdateCustomer()
+    {
+        ErrorMessage = "";
+        var original = (from x in Customers
+                        where x.CustomerId == Customer.CustomerId
+                        select x).FirstOrDefault();
+        if (original != null)
+        {
+            var index = Customers.IndexOf(original);
+            var updated = await CustomerManager.Update(Customer);
+            if (updated != null)
+            {
+                Customers[index] = updated;
+                // Update other clients
+                await connection.InvokeAsync("SyncRecord", "customers", "update",
+                                             Customer.CustomerId);
+            }
+            else
+            {
+                ErrorMessage = "Could not update Customer";
+            }
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    async Task CustomerSelected(ChangeEventArgs args)
+    {
+        ErrorMessage = "";
+        var result = (from x in Customers
+                      where x.CustomerId == args.Value.ToString()
+                      select x).FirstOrDefault();
+
+        // Get the Customer via the API just to exercise all the methods:
+        Customer = await CustomerManager.GetByID(result.CustomerId);
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    bool CanIAddaCustomer()
+    {
+        // only if it doesn't exist
+        var existing = (from x in Customers
+                        where x.CustomerId == "CFUSA"
+                        select x).FirstOrDefault();
+        if (existing != null)
+            return false;
+        else
+            return true;
+    }
+
+    async Task AddCustomer()
+    {
+        ErrorMessage = "";
+        var Customer = new Customers();
+        Customer.Address = "1 Somewhere Street";
+        Customer.City = "Anytown";
+        Customer.CompanyName = "Pwop";
+        Customer.ContactName = "Carl Franklin";
+        Customer.ContactTitle = "President";
+        Customer.CustomerId = "CFUSA";
+        Customer.Country = "USA";
+        Customer.Fax = "1112222333";
+        Customer.Phone = "123123132";
+        Customer.PostalCode = "09876";
+        Customer.Region = "New London";
+        var result = await CustomerManager.Insert(Customer);
+        if (result != null)
+        {
+            Customers.Add(result);
+            Customer = result;
+            // Update other clients
+            await connection.InvokeAsync("SyncRecord", "customers", "add",
+                                         Customer.CustomerId);
+        }
+        else
+        {
+            ErrorMessage = "Could not add customer";
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    async Task GetAllCustomers()
+    {
+        ErrorMessage = "";
+        try
+        {
+            var result = await CustomerManager.GetAll();
+            if (result != null)
+            {
+                Customers = result.ToList<Customers>();
+                Customer = null;
+            }
+            else
+            {
+                ErrorMessage = "Could not fetch customers";
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = ex.Message;
+        }
+    }
+
+    async Task OnReceiveSync(string Table, string Action, string Id)
+    {
+        ErrorMessage = "";
+        if (Table == "customers" && Action != "delete")
+        {
+            await GetAllCustomers();
+        }
+        else if (Table == "customers" && Action == "delete")
+        {
+            var customer = (from x in Customers
+                            where x.CustomerId == Id
+                            select x).FirstOrDefault();
+            if (customer != null)
+            {
+                Customers.Remove(customer);
+            }
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        connection = new HubConnectionBuilder()
+           .WithUrl($"{HttpClient.BaseAddress}DataHub")
+           .Build();
+
+        connection.On<string, string, string>("ReceiveSyncRecord",
+                       this.OnReceiveSync);
+
+        try
+        {
+            await connection.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = ex.Message;
+        }
+        await GetAllCustomers();
+    }
+}
